@@ -48,16 +48,15 @@ const (
 	hopPenalty     = 15 / 255
 )
 
-type Network struct {
-	Nodes map[string]*Node
-	Edges map[string]*Edge
-}
+// type Network struct {
+// 	Nodes map[string]*Node
+// 	Edges map[string]*Edge
+// }
 
 type Node struct {
-	*Network
 	Address       string
-	Originators   map[string]*Originator
-	Neighbors     map[string]*Neighbor
+	Originators   map[string]Originator
+	Neighbors     map[string]Neighbor
 	OgmSequence   int
 	PacketChannel chan (Packet)
 }
@@ -65,6 +64,7 @@ type Node struct {
 type Neighbor struct {
 	Address    string
 	Throughput int
+	Edge       *Edge
 }
 
 type Originator struct {
@@ -77,11 +77,10 @@ type Originator struct {
 }
 
 type Edge struct {
-	Throughput    int
-	PacketChannel chan (Packet)
-	Destination   *Node
-	sat           bool
-	mut           *sync.Mutex
+	Throughput  int
+	Destination *Node
+	sat         bool
+	mut         sync.Mutex
 }
 
 type OGM struct {
@@ -97,38 +96,67 @@ type Packet struct {
 	Payload []byte
 }
 
-// func (router *Node) BroadcastOgm() {
-// 	router.OgmSequence++
-// 	for address, _ := range router {
-// 		router.
+// func InitNetwork() Network {
+// 	return Network{
+// 		Nodes: map[string]*Node{
+// 			"A": &Node{
+// 				Address
+// 			},
+// 			"B": &Node{},
+// 		},
+// 		Edges: map[string]*Edge{
+// 			"A->B": &Edge{},
+// 		},
 // 	}
 // }
 
-// func (edge *Edge) SendBits(num int) bool {
-// 	newBucket := edge.Bucket + num
-// 	if newBucket > edge.Throughput {
-// 		edge.Bucket = edge.Throughput
-// 		return false
-// 	}
-// 	edge.Bucket = newBucket
-// 	return true
-// }
+func main() {
+	a := Node{
+		Address:       "A",
+		PacketChannel: make(chan (Packet)),
+	}
 
-// func (edge *Edge) RunTicker() {
-// 	for range time.Tick(time.Second / time.Duration(edge.TicksPerSecond)) {
-// 		if edge.Bucket > 0 {
-// 			edge.Bucket -= edge.Throughput / edge.TicksPerSecond
-// 		}
-// 	}
-// }
+	b := Node{
+		Address:       "B",
+		PacketChannel: make(chan (Packet)),
+	}
+
+	aToB := Edge{
+		Destination: &b,
+		Throughput:  10,
+	}
+
+	bToA := Edge{
+		Destination: &a,
+		Throughput:  10,
+	}
+
+	a.Neighbors = map[string]Neighbor{
+		"B": Neighbor{
+			Edge: &aToB,
+		},
+	}
+
+	b.Neighbors = map[string]Neighbor{
+		"A": Neighbor{
+			Edge: &bToA,
+		},
+	}
+
+	go a.Listen()
+	go b.Listen()
+
+	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")})
+	time.Sleep(time.Minute)
+}
 
 func (edge *Edge) Saturate(bits int) {
 	edge.mut.Lock()
 	edge.sat = true
 	edge.mut.Unlock()
-
+	log.Println("saturated", bits)
 	time.Sleep(time.Duration(bits*(1/edge.Throughput)) * time.Second)
-
+	log.Println("unsaturated")
 	edge.mut.Lock()
 	edge.sat = false
 	edge.mut.Unlock()
@@ -142,24 +170,11 @@ func (edge *Edge) IsSaturated() bool {
 	return sat
 }
 
-func (edge *Edge) Listen() {
-	for {
-		packet := <-edge.PacketChannel
-		if !edge.IsSaturated() {
-			go edge.Saturate(len(packet.Payload))
-			edge.Destination.PacketChannel <- packet
-		}
+func (edge *Edge) SendPacket(packet Packet) {
+	if !edge.IsSaturated() {
+		go edge.Saturate(len(packet.Payload))
+		edge.Destination.PacketChannel <- packet
 	}
-}
-
-func (node *Node) SendPacket(destAddress string, packetType string, payload []byte) error {
-	edge := node.Network.Edges[node.Address+"->"+destAddress]
-	if edge == nil {
-		return errors.New("edge not found")
-	}
-	edge.PacketChannel <- Packet{packetType, payload}
-
-	return nil
 }
 
 func (node *Node) Listen() {
@@ -169,6 +184,8 @@ func (node *Node) Listen() {
 		switch packet.Type {
 		case "OGM":
 			err = node.HandleOGM(packet.Payload)
+		case "DATA":
+			log.Println(string(packet.Payload))
 		}
 
 		if err != nil {
@@ -210,8 +227,8 @@ func (node *Node) AdjustOGM(ogm OGM) (*OGM, error) {
 	 *  - For OGMs traversing more than one hop the path throughput metric is
 	 *    the smaller of the path throughput and the link throughput.
 	 */
-	neighbor := node.Neighbors[ogm.SenderAddress]
-	if neighbor == nil {
+	neighbor, exists := node.Neighbors[ogm.SenderAddress]
+	if !exists {
 		return nil, errors.New("OGM not sent from neighbor")
 	}
 
@@ -228,9 +245,9 @@ func (node *Node) AdjustOGM(ogm OGM) (*OGM, error) {
 }
 
 func (node *Node) UpdateOriginator(ogm OGM) error {
-	originator := node.Originators[ogm.OriginatorAddress]
+	originator, exists := node.Originators[ogm.OriginatorAddress]
 
-	if originator == nil {
+	if !exists {
 		originator := Originator{
 			OgmSequence: ogm.Sequence,
 			Address:     ogm.OriginatorAddress,
@@ -238,7 +255,7 @@ func (node *Node) UpdateOriginator(ogm OGM) error {
 		originator.NextHop.Address = ogm.SenderAddress
 		originator.NextHop.Throughput = ogm.Throughput
 
-		node.Originators[ogm.OriginatorAddress] = &originator
+		node.Originators[ogm.OriginatorAddress] = originator
 	} else if ogm.Sequence > originator.OgmSequence {
 		if originator.NextHop.Throughput < ogm.Throughput {
 			originator.NextHop.Address = ogm.SenderAddress
@@ -257,10 +274,7 @@ func (node *Node) RebroadcastOGM(ogm OGM) error {
 		return err
 	}
 	for _, neighbor := range node.Neighbors {
-		err = node.SendPacket(neighbor.Address, "OGM", payload)
-		if err != nil {
-			return err
-		}
+		neighbor.Edge.SendPacket(Packet{"OGM", payload})
 	}
 	return nil
 }
