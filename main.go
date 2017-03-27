@@ -147,7 +147,7 @@ func main() {
 	go b.Listen()
 
 	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")})
-	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")})
+	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")}) // second packet is dropped because edge is saturated
 	time.Sleep(time.Minute)
 }
 
