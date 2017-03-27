@@ -147,6 +147,7 @@ func main() {
 	go b.Listen()
 
 	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")})
+	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")})
 	time.Sleep(time.Minute)
 }
 
@@ -154,9 +155,13 @@ func (edge *Edge) Saturate(bits int) {
 	edge.mut.Lock()
 	edge.sat = true
 	edge.mut.Unlock()
-	log.Println("saturated", bits)
-	time.Sleep(time.Duration(bits*(1/edge.Throughput)) * time.Second)
+
+	satDuration := time.Duration(bits*(1000000/edge.Throughput)) * time.Microsecond
+
+	log.Println("saturated for", satDuration)
+	time.Sleep(satDuration)
 	log.Println("unsaturated")
+
 	edge.mut.Lock()
 	edge.sat = false
 	edge.mut.Unlock()
