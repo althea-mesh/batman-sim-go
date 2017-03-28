@@ -59,6 +59,26 @@ type Node struct {
 	Neighbors     map[string]Neighbor
 	OgmSequence   int
 	PacketChannel chan (Packet)
+	Peers         map[string]Peer
+}
+
+type Peer struct {
+	Address string
+	Packets struct {
+		Sent     []PacketRecord
+		Received []PacketRecord
+	}
+	Acks struct {
+		Sent     []PacketRecord
+		Received []PacketRecord
+	}
+}
+
+type PacketRecord struct {
+	NumBytes    int
+	Time        time.Time
+	Source      string
+	Destination string
 }
 
 type Neighbor struct {
@@ -92,25 +112,14 @@ type OGM struct {
 }
 
 type Packet struct {
-	Type    string
-	Payload []byte
+	Type        string
+	Source      string
+	Destination string
+	Payload     []byte
 }
 
-// func InitNetwork() Network {
-// 	return Network{
-// 		Nodes: map[string]*Node{
-// 			"A": &Node{
-// 				Address
-// 			},
-// 			"B": &Node{},
-// 		},
-// 		Edges: map[string]*Edge{
-// 			"A->B": &Edge{},
-// 		},
-// 	}
-// }
-
 func main() {
+	log.SetFlags(log.Lmicroseconds)
 	a := Node{
 		Address:       "A",
 		PacketChannel: make(chan (Packet)),
@@ -123,12 +132,12 @@ func main() {
 
 	aToB := Edge{
 		Destination: &b,
-		Throughput:  10,
+		Throughput:  1000,
 	}
 
 	bToA := Edge{
 		Destination: &a,
-		Throughput:  10,
+		Throughput:  1000,
 	}
 
 	a.Neighbors = map[string]Neighbor{
@@ -146,16 +155,16 @@ func main() {
 	go a.Listen()
 	go b.Listen()
 
-	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")})
-	a.Neighbors["B"].Edge.SendPacket(Packet{"DATA", []byte("shibby")}) // second packet is dropped because edge is saturated
+	a.SendSpeedTest("B", time.Microsecond*500, 100)
 	time.Sleep(time.Minute)
 }
 
-func (edge *Edge) Saturate(bits int) {
+func (edge *Edge) Saturate(bytes int) {
 	edge.mut.Lock()
 	edge.sat = true
 	edge.mut.Unlock()
 
+	bits := bytes * 8
 	satDuration := time.Duration(bits*(1000000/edge.Throughput)) * time.Microsecond
 
 	log.Println("saturated for", satDuration)
@@ -182,6 +191,14 @@ func (edge *Edge) SendPacket(packet Packet) {
 	}
 }
 
+func (node *Node) SendPacket(packet Packet) {
+	originator, exists := node.Originators[packet.Destination]
+	if exists {
+		address := originator.NextHop.Address
+		node.Neighbors[address].Edge.SendPacket(packet)
+	}
+}
+
 func (node *Node) Listen() {
 	for {
 		packet := <-node.PacketChannel
@@ -193,9 +210,26 @@ func (node *Node) Listen() {
 			log.Println(string(packet.Payload))
 		}
 
+		peer := node.Peers[packet.Source]
+		peer.Packets.Received = append(peer.Packets.Received, PacketRecord{
+			NumBytes: len(packet.Payload),
+			Time:     time.Now(),
+		})
+
 		if err != nil {
 			log.Println(node.Address, err)
 		}
+	}
+}
+
+func (node *Node) SendSpeedTest(destination string, interval time.Duration, numBytes int) {
+	for range time.Tick(interval) {
+		node.SendPacket(Packet{
+			Type:        "DATA",
+			Destination: destination,
+			Source:      node.Address,
+			Payload:     make([]byte, numBytes),
+		})
 	}
 }
 
@@ -261,15 +295,17 @@ func (node *Node) UpdateOriginator(ogm OGM) error {
 		originator.NextHop.Throughput = ogm.Throughput
 
 		node.Originators[ogm.OriginatorAddress] = originator
-	} else if ogm.Sequence > originator.OgmSequence {
-		if originator.NextHop.Throughput < ogm.Throughput {
-			originator.NextHop.Address = ogm.SenderAddress
-			originator.NextHop.Throughput = ogm.Throughput
-		}
-	} else {
-		return errors.New("ogm sequence too low")
+		return nil
 	}
-	return nil
+
+	if ogm.Sequence > originator.OgmSequence &&
+		originator.NextHop.Throughput < ogm.Throughput {
+		originator.NextHop.Address = ogm.SenderAddress
+		originator.NextHop.Throughput = ogm.Throughput
+		return nil
+	}
+
+	return errors.New("ogm sequence too low")
 }
 
 func (node *Node) RebroadcastOGM(ogm OGM) error {
@@ -279,7 +315,12 @@ func (node *Node) RebroadcastOGM(ogm OGM) error {
 		return err
 	}
 	for _, neighbor := range node.Neighbors {
-		neighbor.Edge.SendPacket(Packet{"OGM", payload})
+		node.SendPacket(Packet{
+			Type:        "OGM",
+			Source:      node.Address,
+			Destination: neighbor.Address,
+			Payload:     payload,
+		})
 	}
 	return nil
 }
