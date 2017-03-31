@@ -1,45 +1,32 @@
 package main
 
-// func main() {
-// 	ch := make(chan int)
-// 	go listen(ch)
-// 	go send(ch, 4)
-// 	time.Sleep(time.Second)
-// 	go send(ch, 1)
-// 	time.Sleep(time.Second)
-// 	go send(ch, 1)
-// 	time.Sleep(time.Second)
-// 	go send(ch, 1)
-// 	time.Sleep(time.Second)
-// 	go send(ch, 1)
-// 	time.Sleep(time.Second)
-// 	go send(ch, 1)
+/*
+When you start receiving packets from a certain source, start an interval timer.
 
-// 	time.Sleep(time.Minute)
-// }
+On that interval, send the source an ack message containing a start time, an end time,
+and the number of bytes you have received from that source during the time period.
 
-// func send(ch chan int, i int) {
-// 	ch <- i
-// }
+When you receive such an ack from a destination, discard it if you have switched next hops to
+that destination during the ack's time period. (This is because if you have switched next hops
+during this period, the ack will not be accurate for the new next hop)
 
-// func listen(ch chan int) {
-// 	l := MakeLink()
-// 	for {
-// 		i := <-ch
-// 		if !l.IsSaturated() {
-// 			go l.Saturate(i)
-// 			log.Println("keeping", i)
-// 		} else {
-// 			log.Println("discarding", i)
-// 		}
-// 	}
-// }
+Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
+that destination during the ack's time period.
+
+Calculate packet loss percentage using these numbers. If the packet loss percentage computed
+from the ack is over some threshold lower than the packet loss percentage reported by the next hop,
+adjust the packet loss percentage through that next hop.
+The details of this adjustment are covered elsewhere.
+
+Forward the ack to the next hop for that destination.
+
+When you receive a forwarded ack, follow the same procedure.
+*/
 
 import (
 	"encoding/json"
 	"errors"
 	"log"
-	"sync"
 	"time"
 )
 
@@ -48,27 +35,30 @@ const (
 	hopPenalty     = 15 / 255
 )
 
-// type Network struct {
-// 	Nodes map[string]*Node
-// 	Edges map[string]*Edge
-// }
-
 type Node struct {
 	Address       string
-	Originators   map[string]Originator
+	Destinations  map[string]Destination
 	Neighbors     map[string]Neighbor
 	OgmSequence   int
 	PacketChannel chan (Packet)
-	Peers         map[string]Peer
+	PacketRecords []PacketRecord
 }
 
-type Peer struct {
+type Neighbor struct {
+	Address    string
+	Throughput int
+	Edge       *Edge
+}
+
+type Destination struct {
 	Address string
-	Packets struct {
-		Sent     []PacketRecord
-		Received []PacketRecord
+	NextHop struct {
+		Address    string
+		Throughput int
 	}
-	Acks struct {
+	OgmSequence int
+	PacketsSent map[string]PacketRecord // indexed by source address
+	Acks        struct {
 		Sent     []PacketRecord
 		Received []PacketRecord
 	}
@@ -81,41 +71,19 @@ type PacketRecord struct {
 	Destination string
 }
 
-type Neighbor struct {
-	Address    string
-	Throughput int
-	Edge       *Edge
-}
-
-type Originator struct {
-	Address string
-	NextHop struct {
-		Address    string
-		Throughput int
-	}
-	OgmSequence int
-}
-
-type Edge struct {
-	Throughput  int
-	Destination *Node
-	sat         bool
-	mut         sync.Mutex
-}
-
-type OGM struct {
-	Sequence          int
-	OriginatorAddress string
-	SenderAddress     string
-	Throughput        int
-	Timestamp         int
-}
-
 type Packet struct {
 	Type        string
 	Source      string
 	Destination string
 	Payload     []byte
+}
+
+type OGM struct {
+	Sequence           int
+	DestinationAddress string
+	SenderAddress      string
+	Throughput         int
+	Timestamp          int
 }
 
 func main() {
@@ -159,42 +127,10 @@ func main() {
 	time.Sleep(time.Minute)
 }
 
-func (edge *Edge) Saturate(bytes int) {
-	edge.mut.Lock()
-	edge.sat = true
-	edge.mut.Unlock()
-
-	bits := bytes * 8
-	satDuration := time.Duration(bits*(1000000/edge.Throughput)) * time.Microsecond
-
-	log.Println("saturated for", satDuration)
-	time.Sleep(satDuration)
-	log.Println("unsaturated")
-
-	edge.mut.Lock()
-	edge.sat = false
-	edge.mut.Unlock()
-}
-
-func (edge *Edge) IsSaturated() bool {
-	edge.mut.Lock()
-	sat := edge.sat
-	edge.mut.Unlock()
-
-	return sat
-}
-
-func (edge *Edge) SendPacket(packet Packet) {
-	if !edge.IsSaturated() {
-		go edge.Saturate(len(packet.Payload))
-		edge.Destination.PacketChannel <- packet
-	}
-}
-
 func (node *Node) SendPacket(packet Packet) {
-	originator, exists := node.Originators[packet.Destination]
+	dest, exists := node.Destinations[packet.Destination]
 	if exists {
-		address := originator.NextHop.Address
+		address := dest.NextHop.Address
 		node.Neighbors[address].Edge.SendPacket(packet)
 	}
 }
@@ -209,12 +145,6 @@ func (node *Node) Listen() {
 		case "DATA":
 			log.Println(string(packet.Payload))
 		}
-
-		peer := node.Peers[packet.Source]
-		peer.Packets.Received = append(peer.Packets.Received, PacketRecord{
-			NumBytes: len(packet.Payload),
-			Time:     time.Now(),
-		})
 
 		if err != nil {
 			log.Println(node.Address, err)
@@ -240,7 +170,7 @@ func (node *Node) HandleOGM(payload []byte) error {
 		return err
 	}
 
-	if ogm.OriginatorAddress == node.Address {
+	if ogm.DestinationAddress == node.Address {
 		return nil
 	}
 
@@ -249,7 +179,7 @@ func (node *Node) HandleOGM(payload []byte) error {
 		return err
 	}
 
-	err = node.UpdateOriginator(*adjustedOGM)
+	err = node.UpdateDestination(*adjustedOGM)
 	if err != nil {
 		return err
 	}
@@ -271,7 +201,7 @@ func (node *Node) AdjustOGM(ogm OGM) (*OGM, error) {
 		return nil, errors.New("OGM not sent from neighbor")
 	}
 
-	if ogm.OriginatorAddress == ogm.SenderAddress {
+	if ogm.DestinationAddress == ogm.SenderAddress {
 		ogm.Throughput = neighbor.Throughput
 	} else {
 		if neighbor.Throughput < ogm.Throughput {
@@ -283,25 +213,25 @@ func (node *Node) AdjustOGM(ogm OGM) (*OGM, error) {
 	return &ogm, nil
 }
 
-func (node *Node) UpdateOriginator(ogm OGM) error {
-	originator, exists := node.Originators[ogm.OriginatorAddress]
+func (node *Node) UpdateDestination(ogm OGM) error {
+	dest, exists := node.Destinations[ogm.DestinationAddress]
 
 	if !exists {
-		originator := Originator{
+		dest := Destination{
 			OgmSequence: ogm.Sequence,
-			Address:     ogm.OriginatorAddress,
+			Address:     ogm.DestinationAddress,
 		}
-		originator.NextHop.Address = ogm.SenderAddress
-		originator.NextHop.Throughput = ogm.Throughput
+		dest.NextHop.Address = ogm.SenderAddress
+		dest.NextHop.Throughput = ogm.Throughput
 
-		node.Originators[ogm.OriginatorAddress] = originator
+		node.Destinations[ogm.DestinationAddress] = dest
 		return nil
 	}
 
-	if ogm.Sequence > originator.OgmSequence &&
-		originator.NextHop.Throughput < ogm.Throughput {
-		originator.NextHop.Address = ogm.SenderAddress
-		originator.NextHop.Throughput = ogm.Throughput
+	if ogm.Sequence > dest.OgmSequence &&
+		dest.NextHop.Throughput < ogm.Throughput {
+		dest.NextHop.Address = ogm.SenderAddress
+		dest.NextHop.Throughput = ogm.Throughput
 		return nil
 	}
 
