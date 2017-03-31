@@ -7,8 +7,8 @@ On that interval, send the source an ack message containing a start time, an end
 and the number of bytes you have received from that source during the time period.
 
 When you receive such an ack from a destination, discard it if you have switched next hops to
-that destination during the ack's time period. (This is because if you have switched next hops
-during this period, the ack will not be accurate for the new next hop)
+that destination after the ack's start time.
+(This is because the ack will not be relevant to the new next hop)
 
 Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
 that destination during the ack's time period.
@@ -37,35 +37,47 @@ const (
 
 type Node struct {
 	Address       string
+	Sources       map[string]Source
 	Destinations  map[string]Destination
 	Neighbors     map[string]Neighbor
 	OgmSequence   int
 	PacketChannel chan (Packet)
-	PacketRecords []PacketRecord
 }
 
 type Neighbor struct {
-	Address    string
-	Throughput int
-	Edge       *Edge
+	Address       string
+	PacketSuccess float64
+	Edge          *Edge
 }
 
 type Destination struct {
 	Address string
 	NextHop struct {
-		Address    string
-		Throughput int
+		Address      string
+		Throughput   int
+		TimeSwitched time.Time
 	}
-	OgmSequence int
-	PacketsSent map[string]PacketRecord // indexed by source address
-	Acks        struct {
-		Sent     []PacketRecord
-		Received []PacketRecord
-	}
+	OgmSequence  int
+	PacketsSent  map[string]PacketRecords // indexed by source address
+	AcksReceived []Ack
+}
+
+type PacketRecords []PacketRecord
+
+type Source struct {
+	LastAckSent Ack
+}
+
+type Ack struct {
+	BytesReceived int
+	StartTime     time.Time
+	EndTime       time.Time
+	Source        string
+	Destination   string // destination of the data packets, not the ack
 }
 
 type PacketRecord struct {
-	NumBytes    int
+	Bytes       int
 	Time        time.Time
 	Source      string
 	Destination string
@@ -130,6 +142,15 @@ func main() {
 func (node *Node) SendPacket(packet Packet) {
 	dest, exists := node.Destinations[packet.Destination]
 	if exists {
+		dest.PacketsSent[packet.Source] = append(
+			dest.PacketsSent[packet.Source],
+			PacketRecord{
+				Bytes:       len(packet.Payload),
+				Time:        time.Now(),
+				Source:      packet.Source,
+				Destination: packet.Destination,
+			},
+		)
 		address := dest.NextHop.Address
 		node.Neighbors[address].Edge.SendPacket(packet)
 	}
@@ -138,17 +159,28 @@ func (node *Node) SendPacket(packet Packet) {
 func (node *Node) Listen() {
 	for {
 		packet := <-node.PacketChannel
-		var err error
-		switch packet.Type {
-		case "OGM":
-			err = node.HandleOGM(packet.Payload)
-		case "DATA":
-			log.Println(string(packet.Payload))
-		}
 
-		if err != nil {
-			log.Println(node.Address, err)
+		if packet.Source == node.Address {
+			node.HandlePacket(packet)
+		} else {
+			node.SendPacket(packet)
 		}
+	}
+}
+
+func (node *Node) HandlePacket(packet Packet) {
+	var err error
+	switch packet.Type {
+	case "OGM":
+		err = node.HandleOGM(packet.Payload)
+	case "ACK":
+		err = node.HandleAck(packet.Payload)
+	default:
+		log.Println(string(packet.Payload))
+	}
+
+	if err != nil {
+		log.Println(node.Address, err)
 	}
 }
 
@@ -161,6 +193,37 @@ func (node *Node) SendSpeedTest(destination string, interval time.Duration, numB
 			Payload:     make([]byte, numBytes),
 		})
 	}
+}
+
+func (node *Node) HandleAck(payload []byte) error {
+	ack := Ack{}
+	err := json.Unmarshal(payload, ack)
+	if err != nil {
+		return err
+	}
+	dest, exists := node.Destinations[ack.Destination]
+
+	if !exists {
+		return nil
+	}
+
+	if dest.NextHop.TimeSwitched.After(ack.StartTime) {
+		return nil
+	}
+
+	bytesSent := dest.PacketsSent[ack.Destination].SumBytes(ack.StartTime, ack.EndTime)
+	packetLoss := float64(bytesSent / ack.BytesReceived)
+
+	return nil
+}
+
+func (prs PacketRecords) SumBytes(start time.Time, end time.Time) int {
+	acc := 0
+	for _, pr := range prs {
+		acc += pr.Bytes
+	}
+
+	return acc
 }
 
 func (node *Node) HandleOGM(payload []byte) error {
@@ -228,14 +291,19 @@ func (node *Node) UpdateDestination(ogm OGM) error {
 		return nil
 	}
 
-	if ogm.Sequence > dest.OgmSequence &&
-		dest.NextHop.Throughput < ogm.Throughput {
-		dest.NextHop.Address = ogm.SenderAddress
-		dest.NextHop.Throughput = ogm.Throughput
-		return nil
+	if ogm.Sequence > dest.OgmSequence {
+		return errors.New("ogm sequence too low")
 	}
 
-	return errors.New("ogm sequence too low")
+	if dest.NextHop.Throughput < ogm.Throughput {
+		dest.NextHop.Throughput = ogm.Throughput
+		if dest.NextHop.Address != ogm.SenderAddress {
+			dest.NextHop.Address = ogm.SenderAddress
+			dest.NextHop.TimeSwitched = time.Now()
+		}
+	}
+
+	return nil
 }
 
 func (node *Node) RebroadcastOGM(ogm OGM) error {
