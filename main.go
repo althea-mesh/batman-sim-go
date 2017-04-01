@@ -53,9 +53,9 @@ type Neighbor struct {
 type Destination struct {
 	Address string
 	NextHop struct {
-		Address      string
-		Throughput   int
-		TimeSwitched time.Time
+		Address       string
+		PacketSuccess float64
+		TimeSwitched  time.Time
 	}
 	OgmSequence  int
 	PacketsSent  map[string]PacketRecords // indexed by source address
@@ -94,7 +94,7 @@ type OGM struct {
 	Sequence           int
 	DestinationAddress string
 	SenderAddress      string
-	Throughput         int
+	PacketSuccess      float64
 	Timestamp          int
 }
 
