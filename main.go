@@ -13,9 +13,9 @@ that destination after the ack's start time.
 Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
 that destination during the ack's time period.
 
-Calculate packet loss percentage using these numbers. If the packet loss percentage computed
-from the ack is over some threshold lower than the packet loss percentage reported by the next hop,
-adjust the packet loss percentage through that next hop.
+Calculate packet success percentage using these numbers. If the packet success percentage computed
+from the ack is over some threshold lower than the packet success percentage reported by the next hop,
+adjust the packet success percentage through that next hop.
 The details of this adjustment are covered elsewhere.
 
 Forward the ack to the next hop for that destination.
@@ -32,7 +32,7 @@ import (
 
 const (
 	timeMultiplier = 1000
-	hopPenalty     = 15 / 255
+	hopMultiplier  = 0.94
 )
 
 type Node struct {
@@ -51,15 +51,17 @@ type Neighbor struct {
 }
 
 type Destination struct {
-	Address string
-	NextHop struct {
-		Address       string
-		PacketSuccess float64
-		TimeSwitched  time.Time
-	}
+	Address      string
+	NextHop      NextHop
 	OgmSequence  int
 	PacketsSent  map[string]PacketRecords // indexed by source address
 	AcksReceived []Ack
+}
+
+type NextHop struct {
+	Address       string
+	PacketSuccess float64
+	TimeSwitched  time.Time
 }
 
 type PacketRecords []PacketRecord
@@ -112,17 +114,27 @@ func main() {
 
 	aToB := Edge{
 		Destination: &b,
-		Throughput:  1000,
+		Throughput:  5000,
 	}
 
 	bToA := Edge{
 		Destination: &a,
-		Throughput:  1000,
+		Throughput:  5000,
 	}
 
 	a.Neighbors = map[string]Neighbor{
 		"B": Neighbor{
 			Edge: &aToB,
+		},
+	}
+
+	a.Destinations = map[string]Destination{
+		"B": {
+			Address: "B",
+			NextHop: NextHop{
+				Address: "B",
+			},
+			PacketsSent: map[string]PacketRecords{},
 		},
 	}
 
@@ -132,17 +144,29 @@ func main() {
 		},
 	}
 
+	b.Destinations = map[string]Destination{
+		"A": {
+			Address: "A",
+			NextHop: NextHop{
+				Address: "A",
+			},
+			PacketsSent: map[string]PacketRecords{},
+		},
+	}
+
+	log.Println("foo")
 	go a.Listen()
 	go b.Listen()
 
-	a.SendSpeedTest("B", time.Microsecond*500, 100)
-	time.Sleep(time.Minute)
+	a.SendSpeedTest("B", time.Millisecond*300, 100)
+	// time.Sleep(time.Minute)
 }
 
 func (node *Node) SendPacket(packet Packet) {
 	dest, exists := node.Destinations[packet.Destination]
 	if exists {
-		dest.PacketsSent[packet.Source] = append(
+		packetsSent := dest.PacketsSent[packet.Source]
+		packetsSent = append(
 			dest.PacketsSent[packet.Source],
 			PacketRecord{
 				Bytes:       len(packet.Payload),
@@ -151,6 +175,13 @@ func (node *Node) SendPacket(packet Packet) {
 				Destination: packet.Destination,
 			},
 		)
+
+		if len(packetsSent) > 100 {
+			packetsSent = packetsSent[:100]
+		}
+
+		dest.PacketsSent[packet.Source] = packetsSent
+
 		address := dest.NextHop.Address
 		node.Neighbors[address].Edge.SendPacket(packet)
 	}
@@ -190,7 +221,7 @@ func (node *Node) SendSpeedTest(destination string, interval time.Duration, numB
 			Type:        "DATA",
 			Destination: destination,
 			Source:      node.Address,
-			Payload:     make([]byte, numBytes),
+			Payload:     []byte("aoaoaooaoaoaoaoaoa"),
 		})
 	}
 }
@@ -212,7 +243,9 @@ func (node *Node) HandleAck(payload []byte) error {
 	}
 
 	bytesSent := dest.PacketsSent[ack.Destination].SumBytes(ack.StartTime, ack.EndTime)
-	packetLoss := float64(bytesSent / ack.BytesReceived)
+	packetSuccess := float64(ack.BytesReceived / bytesSent)
+
+	log.Println(packetSuccess)
 
 	return nil
 }
@@ -252,27 +285,12 @@ func (node *Node) HandleOGM(payload []byte) error {
 }
 
 func (node *Node) AdjustOGM(ogm OGM) (*OGM, error) {
-	/* Update the received throughput metric to match the link
-	 * characteristic:
-	 *  - If this OGM traveled one hop so far (emitted by single hop
-	 *    neighbor) the path throughput metric equals the link throughput.
-	 *  - For OGMs traversing more than one hop the path throughput metric is
-	 *    the smaller of the path throughput and the link throughput.
-	 */
 	neighbor, exists := node.Neighbors[ogm.SenderAddress]
 	if !exists {
 		return nil, errors.New("OGM not sent from neighbor")
 	}
 
-	if ogm.DestinationAddress == ogm.SenderAddress {
-		ogm.Throughput = neighbor.Throughput
-	} else {
-		if neighbor.Throughput < ogm.Throughput {
-			ogm.Throughput = neighbor.Throughput
-		}
-	}
-
-	ogm.Throughput = ogm.Throughput - (ogm.Throughput * hopPenalty)
+	ogm.PacketSuccess = ogm.PacketSuccess * neighbor.PacketSuccess * hopMultiplier
 	return &ogm, nil
 }
 
@@ -285,18 +303,19 @@ func (node *Node) UpdateDestination(ogm OGM) error {
 			Address:     ogm.DestinationAddress,
 		}
 		dest.NextHop.Address = ogm.SenderAddress
-		dest.NextHop.Throughput = ogm.Throughput
+		dest.NextHop.PacketSuccess = ogm.PacketSuccess
 
 		node.Destinations[ogm.DestinationAddress] = dest
 		return nil
 	}
 
-	if ogm.Sequence > dest.OgmSequence {
+	if ogm.Sequence <= dest.OgmSequence {
 		return errors.New("ogm sequence too low")
 	}
 
-	if dest.NextHop.Throughput < ogm.Throughput {
-		dest.NextHop.Throughput = ogm.Throughput
+	if dest.NextHop.PacketSuccess < ogm.PacketSuccess {
+		dest.NextHop.PacketSuccess = ogm.PacketSuccess
+
 		if dest.NextHop.Address != ogm.SenderAddress {
 			dest.NextHop.Address = ogm.SenderAddress
 			dest.NextHop.TimeSwitched = time.Now()
