@@ -1,37 +1,33 @@
 package main
 
 import (
-	"log"
 	"sync"
 	"time"
 )
 
 type Edge struct {
-	Throughput  int
-	Destination *Node
-	sat         bool
-	mut         sync.Mutex
+	Throughput    int
+	PacketChannel *chan (Packet)
+	sat           bool
+	mut           sync.Mutex
 }
 
-func (edge *Edge) Saturate(bytes int) {
+func (edge *Edge) saturate(bytes int) {
 	edge.mut.Lock()
 	edge.sat = true
 	edge.mut.Unlock()
 
-	bits := bytes * 8
-	satNum := bits * (1000000 / edge.Throughput)
-	// satDuration := time.Duration(bits*(1000000/edge.Throughput)) * time.Microsecond
+	bits := bytes*8 + 20
+	satDuration := time.Duration(bits*(1000000/edge.Throughput)) * time.Microsecond
 
-	for i := 0; i < satNum*10000; i++ {
-		time.Sleep(time.Microsecond * 1)
-	}
+	time.Sleep(satDuration)
 
 	edge.mut.Lock()
 	edge.sat = false
 	edge.mut.Unlock()
 }
 
-func (edge *Edge) IsSaturated() bool {
+func (edge *Edge) isSaturated() bool {
 	edge.mut.Lock()
 	sat := edge.sat
 	edge.mut.Unlock()
@@ -40,10 +36,8 @@ func (edge *Edge) IsSaturated() bool {
 }
 
 func (edge *Edge) SendPacket(packet Packet) {
-	if !edge.IsSaturated() {
-		go edge.Saturate(len(packet.Payload))
-		edge.Destination.PacketChannel <- packet
-	} else {
-		log.Println("DROPPED")
+	if !edge.isSaturated() {
+		go edge.saturate(len(packet.Payload))
+		*edge.PacketChannel <- packet
 	}
 }
