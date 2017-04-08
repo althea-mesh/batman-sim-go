@@ -16,7 +16,7 @@ func TestSaturateTime(t *testing.T) {
 	}
 
 	hundredKb := Packet{
-		Payload: make([]byte, 1000*100),
+		Payload: make([]byte, 1000*100), // 800 kbits
 	}
 
 	go edge.SendPacket(hundredKb)
@@ -71,13 +71,13 @@ func TestSaturateBasic(t *testing.T) {
 
 func TestSaturateProbability(t *testing.T) {
 	successChan := make(chan (bool))
-	numTries := 100
+	numTries := 1000
 
 	for i := 0; i < numTries; i++ {
 		go func() {
 			pChan := make(chan (Packet))
 			edge := Edge{
-				Throughput:    1000 * 1000, // .5 megabit
+				Throughput:    1000 * 1000, // 1 megabit
 				PacketChannel: &pChan,
 			}
 
@@ -87,11 +87,11 @@ func TestSaturateProbability(t *testing.T) {
 
 			go edge.SendPacket(hundredKb)
 			<-pChan
-			time.Sleep(time.Millisecond * 800)
+			time.Sleep(time.Millisecond * 400)
 
 			go edge.SendPacket(hundredKb)
 			select {
-			case <-time.After(1 * time.Millisecond):
+			case <-time.After(50 * time.Millisecond):
 				successChan <- false
 			case <-pChan:
 				successChan <- true
@@ -107,6 +107,10 @@ func TestSaturateProbability(t *testing.T) {
 	}
 
 	fmt.Println(numSucceeded)
+
+	if numSucceeded > 600 || numSucceeded < 400 {
+		t.Fatalf("%v packets succeeded not within acceptable range", numSucceeded)
+	}
 }
 
 // 	timer := time.Now()
