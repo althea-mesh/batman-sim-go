@@ -30,7 +30,7 @@ func TestSaturate(t *testing.T) {
 		t.Fatalf("Packet should have been dropped.")
 	}
 
-	time.Sleep(time.Millisecond * 1805)
+	time.Sleep(time.Millisecond * 805)
 
 	go edge.SendPacket(hundredKb)
 	select {
@@ -38,6 +38,8 @@ func TestSaturate(t *testing.T) {
 		t.Fatalf("Packet should have succeeded.")
 	case <-pChan:
 	}
+
+	time.Sleep(time.Millisecond * 795)
 
 	go edge.SendPacket(hundredKb)
 	select {
