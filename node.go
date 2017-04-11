@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"time"
 )
@@ -39,7 +38,9 @@ type NextHop struct {
 type PacketRecords []PacketRecord
 
 type Source struct {
-	LastAckSent Ack
+	Address       string
+	LastAckTime   time.Time
+	BytesReceived int
 }
 
 type Ack struct {
@@ -57,6 +58,12 @@ type PacketRecord struct {
 	Destination string
 }
 
+const ackInterval = 5 * time.Second
+
+// SendPacket looks for a destination in the node's routing table.
+// If the destination is found, information about the packet is
+// recorded in the node's PacketsSent list, and the packet is sent
+// to the destination's next hop.
 func (node *Node) SendPacket(packet Packet) {
 	dest, exists := node.Destinations[packet.Destination]
 	if exists {
@@ -82,11 +89,13 @@ func (node *Node) SendPacket(packet Packet) {
 	}
 }
 
+// Listen receives packets and either forwards them or processes them
+// locally with HandlePacket if they are addressed to this node.
 func (node *Node) Listen() {
 	for {
 		packet := <-node.PacketChannel
 
-		if packet.Source == node.Address {
+		if packet.Destination == node.Address {
 			node.HandlePacket(packet)
 		} else {
 			node.SendPacket(packet)
@@ -94,7 +103,22 @@ func (node *Node) Listen() {
 	}
 }
 
+// HandlePacket calls different handlers based on the type of packet.
 func (node *Node) HandlePacket(packet Packet) {
+	source, exists := node.Sources[packet.Source]
+	if exists {
+		source.BytesReceived += len(packet.Payload)
+		if time.Since(source.LastAckTime) > ackInterval {
+			node.SendAck(source)
+		}
+	} else {
+		node.Sources[packet.Source] = Source{
+			Address:       packet.Source,
+			BytesReceived: len(packet.Payload),
+			LastAckTime:   time.Now(),
+		}
+	}
+
 	var err error
 	switch packet.Type {
 	case "OGM":
@@ -102,7 +126,7 @@ func (node *Node) HandlePacket(packet Packet) {
 	case "ACK":
 		err = node.HandleAck(packet.Payload)
 	default:
-		log.Println(string(packet.Payload))
+		log.Printf("Got packet of length: ", len(packet.Payload))
 	}
 
 	if err != nil {
@@ -110,17 +134,67 @@ func (node *Node) HandlePacket(packet Packet) {
 	}
 }
 
+func (node *Node) SendAck(source Source) error {
+	payload, err := json.Marshal(Ack{
+		BytesReceived: source.BytesReceived,
+		StartTime:     source.LastAckTime,
+		EndTime:       time.Now(),
+		Source:        source.Address,
+		Destination:   node.Address,
+	})
+
+	if err != nil {
+		return err
+	}
+
+	node.SendPacket(Packet{
+		Destination: source.Address,
+		Source:      node.Address,
+		Type:        "ACK",
+		Payload:     payload,
+	})
+
+	source.BytesReceived = 0
+
+	return nil
+}
+
+// SendSpeedTest sends a packet of a certain size at a certain interval to attempt to
+// saturate a connection
 func (node *Node) SendSpeedTest(destination string, interval time.Duration, numBytes int) {
 	for range time.Tick(interval) {
 		node.SendPacket(Packet{
 			Type:        "DATA",
 			Destination: destination,
 			Source:      node.Address,
-			Payload:     []byte("aoaoaooaoaoaoaoaoa"),
+			Payload:     make([]byte, numBytes),
 		})
 	}
 }
 
+/*
+When you start receiving packets from a certain source, start an interval timer.
+
+On that interval, send the source an ack message containing a start time, an end time,
+and the number of bytes you have received from that source during the time period.
+
+When you receive such an ack from a destination, discard it if you have switched next hops to
+that destination after the ack's start time.
+(This is because the ack will not be relevant to the new next hop)
+
+Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
+that destination during the ack's time period. Calculate packet success percentage
+using these numbers.
+
+If the packet success percentage computed from the ack is over some threshold lower than the
+packet success percentage reported by the next hop, adjust the packet success percentage
+through that next hop.
+The details of this adjustment are covered elsewhere.
+
+Forward the ack to the next hop for that destination.
+
+When you receive a forwarded ack, follow the same procedure.
+*/
 func (node *Node) HandleAck(payload []byte) error {
 	ack := Ack{}
 	err := json.Unmarshal(payload, ack)
@@ -133,13 +207,23 @@ func (node *Node) HandleAck(payload []byte) error {
 		return nil
 	}
 
+	// When you receive an ack from a destination, discard it if you have switched next hops to
+	// that destination after the ack's start time.
+	// (This is because the ack will not be relevant to the new next hop)
 	if dest.NextHop.TimeSwitched.After(ack.StartTime) {
 		return nil
 	}
 
+	// Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
+	// that destination during the ack's time period.
 	bytesSent := dest.PacketsSent[ack.Destination].SumBytes(ack.StartTime, ack.EndTime)
+
+	// Calculate packet success percentage using these numbers.
 	packetSuccess := float64(ack.BytesReceived / bytesSent)
 
+	// If the packet success percentage computed from the ack is over some threshold lower than the
+	// packet success percentage reported by the next hop, adjust the packet success percentage
+	// through that next hop.
 	log.Println(packetSuccess)
 
 	return nil
@@ -152,87 +236,4 @@ func (prs PacketRecords) SumBytes(start time.Time, end time.Time) int {
 	}
 
 	return acc
-}
-
-func (node *Node) HandleOGM(payload []byte) error {
-	ogm := OGM{}
-	err := json.Unmarshal(payload, ogm)
-	if err != nil {
-		return err
-	}
-
-	if ogm.DestinationAddress == node.Address {
-		return nil
-	}
-
-	adjustedOGM, err := node.AdjustOGM(ogm)
-	if err != nil {
-		return err
-	}
-
-	err = node.UpdateDestination(*adjustedOGM)
-	if err != nil {
-		return err
-	}
-
-	node.RebroadcastOGM(*adjustedOGM)
-	return nil
-}
-
-func (node *Node) AdjustOGM(ogm OGM) (*OGM, error) {
-	neighbor, exists := node.Neighbors[ogm.SenderAddress]
-	if !exists {
-		return nil, errors.New("OGM not sent from neighbor")
-	}
-
-	ogm.PacketSuccess = ogm.PacketSuccess * neighbor.PacketSuccess * hopMultiplier
-	return &ogm, nil
-}
-
-func (node *Node) UpdateDestination(ogm OGM) error {
-	dest, exists := node.Destinations[ogm.DestinationAddress]
-
-	if !exists {
-		dest := Destination{
-			OgmSequence: ogm.Sequence,
-			Address:     ogm.DestinationAddress,
-		}
-		dest.NextHop.Address = ogm.SenderAddress
-		dest.NextHop.PacketSuccess = ogm.PacketSuccess
-
-		node.Destinations[ogm.DestinationAddress] = dest
-		return nil
-	}
-
-	if ogm.Sequence <= dest.OgmSequence {
-		return errors.New("ogm sequence too low")
-	}
-
-	if dest.NextHop.PacketSuccess < ogm.PacketSuccess {
-		dest.NextHop.PacketSuccess = ogm.PacketSuccess
-
-		if dest.NextHop.Address != ogm.SenderAddress {
-			dest.NextHop.Address = ogm.SenderAddress
-			dest.NextHop.TimeSwitched = time.Now()
-		}
-	}
-
-	return nil
-}
-
-func (node *Node) RebroadcastOGM(ogm OGM) error {
-	ogm.SenderAddress = node.Address
-	payload, err := json.Marshal(ogm)
-	if err != nil {
-		return err
-	}
-	for _, neighbor := range node.Neighbors {
-		node.SendPacket(Packet{
-			Type:        "OGM",
-			Source:      node.Address,
-			Destination: neighbor.Address,
-			Payload:     payload,
-		})
-	}
-	return nil
 }

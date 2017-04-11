@@ -40,14 +40,6 @@ type Packet struct {
 	Payload     []byte
 }
 
-type OGM struct {
-	Sequence           int
-	DestinationAddress string
-	SenderAddress      string
-	PacketSuccess      float64
-	Timestamp          int
-}
-
 func main() {
 	log.SetFlags(log.Lmicroseconds)
 	a := Node{
@@ -62,12 +54,12 @@ func main() {
 
 	aToB := Edge{
 		PacketChannel: &b.PacketChannel,
-		Throughput:    5000,
+		Throughput:    1000 * 100,
 	}
 
 	bToA := Edge{
 		PacketChannel: &a.PacketChannel,
-		Throughput:    5000,
+		Throughput:    1000 * 100,
 	}
 
 	a.Neighbors = map[string]Neighbor{
@@ -102,10 +94,9 @@ func main() {
 		},
 	}
 
-	log.Println("foo")
 	go a.Listen()
 	go b.Listen()
 
-	a.SendSpeedTest("B", time.Millisecond*300, 100)
+	a.SendSpeedTest("B", time.Millisecond*300, 5*1000)
 	// time.Sleep(time.Minute)
 }

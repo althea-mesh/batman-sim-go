@@ -1,2 +1,2 @@
 #!bash
-go build && ./batman-sim-go
+go build && ./verified-distance-vector
