@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -37,8 +36,8 @@ func (edge *Edge) SendPacket(packet Packet) {
 			Bytes: len(packet.Payload),
 		}
 		edge.mut.Unlock()
-		log.Printf("packet sent with probability %v > %v", frac, random)
+		// log.Printf("packet sent with probability %v > %v", frac, random)
 	} else {
-		log.Printf("packet dropped with probability %v > %v", frac, random)
+		// log.Printf("packet dropped with probability %v > %v", frac, random)
 	}
 }

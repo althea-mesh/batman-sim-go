@@ -6,6 +6,30 @@ import (
 	"time"
 )
 
+/*
+When you start receiving packets from a certain source, start an interval timer.
+
+On that interval, send the source an ack message containing a start time, an end time,
+and the number of bytes you have received from that source during the time period.
+
+When you receive such an ack from a destination, discard it if you have switched next hops to
+that destination after the ack's start time.
+(This is because the ack will not be relevant to the new next hop)
+
+Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
+that destination during the ack's time period. Calculate packet success percentage
+using these numbers.
+
+If the packet success percentage computed from the ack is over some threshold lower than the
+packet success percentage reported by the next hop, adjust the packet success percentage
+through that next hop.
+The details of this adjustment are covered elsewhere.
+
+Forward the ack to the next hop for that destination.
+
+When you receive a forwarded ack, follow the same procedure.
+*/
+
 type Node struct {
 	Address       string
 	Sources       map[string]Source
@@ -25,7 +49,7 @@ type Destination struct {
 	Address      string
 	NextHop      NextHop
 	OgmSequence  int
-	PacketsSent  map[string]PacketRecords // indexed by source address
+	PacketsSent  PacketRecords // indexed by source address
 	AcksReceived []Ack
 }
 
@@ -67,9 +91,9 @@ const ackInterval = 5 * time.Second
 func (node *Node) SendPacket(packet Packet) {
 	dest, exists := node.Destinations[packet.Destination]
 	if exists {
-		packetsSent := dest.PacketsSent[packet.Source]
-		packetsSent = append(
-			dest.PacketsSent[packet.Source],
+		// packetsSent := dest.PacketsSent
+		dest.PacketsSent = append(
+			dest.PacketsSent,
 			PacketRecord{
 				Bytes:       len(packet.Payload),
 				Time:        time.Now(),
@@ -78,14 +102,15 @@ func (node *Node) SendPacket(packet Packet) {
 			},
 		)
 
-		if len(packetsSent) > 100 {
-			packetsSent = packetsSent[:100]
-		}
-
-		dest.PacketsSent[packet.Source] = packetsSent
+		// Let's wait until the rest of it works
+		// if len(packetsSent) > 100 {
+		// 	packetsSent = packetsSent[:100]
+		// }
 
 		address := dest.NextHop.Address
 		node.Neighbors[address].Edge.SendPacket(packet)
+
+		node.Destinations[packet.Destination] = dest
 	}
 }
 
@@ -103,22 +128,10 @@ func (node *Node) Listen() {
 	}
 }
 
-// HandlePacket calls different handlers based on the type of packet.
+// HandlePacket updates the BytesReceived property for the given source
+// and calls different handlers based on the type of packet.
 func (node *Node) HandlePacket(packet Packet) {
-	source, exists := node.Sources[packet.Source]
-	if exists {
-		source.BytesReceived += len(packet.Payload)
-		if time.Since(source.LastAckTime) > ackInterval {
-			node.SendAck(source)
-		}
-	} else {
-		node.Sources[packet.Source] = Source{
-			Address:       packet.Source,
-			BytesReceived: len(packet.Payload),
-			LastAckTime:   time.Now(),
-		}
-	}
-
+	node.UpdateSourceRecord(packet)
 	var err error
 	switch packet.Type {
 	case "OGM":
@@ -126,15 +139,35 @@ func (node *Node) HandlePacket(packet Packet) {
 	case "ACK":
 		err = node.HandleAck(packet.Payload)
 	default:
-		log.Printf("Got packet of length: ", len(packet.Payload))
+		log.Printf("%v got packet of length: %v", node.Address, len(packet.Payload))
 	}
 
 	if err != nil {
-		log.Println(node.Address, err)
+		log.Printf("error on %v: %v not found.", node.Address, err)
 	}
 }
 
-func (node *Node) SendAck(source Source) error {
+func (node *Node) UpdateSourceRecord(packet Packet) {
+	source, exists := node.Sources[packet.Source]
+	if exists {
+		source.BytesReceived += len(packet.Payload)
+		if time.Since(source.LastAckTime) > ackInterval {
+			node.SendAck(packet.Source)
+		}
+	} else {
+		source = Source{
+			Address:       packet.Source,
+			BytesReceived: len(packet.Payload),
+			LastAckTime:   time.Now(),
+		}
+	}
+
+	node.Sources[packet.Source] = source
+}
+
+// SendAck Sends an Ack to a source, and resets the BytesReceived counter
+func (node *Node) SendAck(sourceAddress string) error {
+	source := node.Sources[sourceAddress]
 	payload, err := json.Marshal(Ack{
 		BytesReceived: source.BytesReceived,
 		StartTime:     source.LastAckTime,
@@ -148,13 +181,14 @@ func (node *Node) SendAck(source Source) error {
 	}
 
 	node.SendPacket(Packet{
-		Destination: source.Address,
+		Destination: sourceAddress,
 		Source:      node.Address,
 		Type:        "ACK",
 		Payload:     payload,
 	})
 
 	source.BytesReceived = 0
+	node.Sources[sourceAddress] = source
 
 	return nil
 }
@@ -172,32 +206,9 @@ func (node *Node) SendSpeedTest(destination string, interval time.Duration, numB
 	}
 }
 
-/*
-When you start receiving packets from a certain source, start an interval timer.
-
-On that interval, send the source an ack message containing a start time, an end time,
-and the number of bytes you have received from that source during the time period.
-
-When you receive such an ack from a destination, discard it if you have switched next hops to
-that destination after the ack's start time.
-(This is because the ack will not be relevant to the new next hop)
-
-Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
-that destination during the ack's time period. Calculate packet success percentage
-using these numbers.
-
-If the packet success percentage computed from the ack is over some threshold lower than the
-packet success percentage reported by the next hop, adjust the packet success percentage
-through that next hop.
-The details of this adjustment are covered elsewhere.
-
-Forward the ack to the next hop for that destination.
-
-When you receive a forwarded ack, follow the same procedure.
-*/
 func (node *Node) HandleAck(payload []byte) error {
 	ack := Ack{}
-	err := json.Unmarshal(payload, ack)
+	err := json.Unmarshal(payload, &ack)
 	if err != nil {
 		return err
 	}
@@ -207,7 +218,7 @@ func (node *Node) HandleAck(payload []byte) error {
 		return nil
 	}
 
-	// When you receive an ack from a destination, discard it if you have switched next hops to
+	// When you receive an ack from a destination, discard it if you have switched the next hop of
 	// that destination after the ack's start time.
 	// (This is because the ack will not be relevant to the new next hop)
 	if dest.NextHop.TimeSwitched.After(ack.StartTime) {
@@ -216,15 +227,18 @@ func (node *Node) HandleAck(payload []byte) error {
 
 	// Next, compare the number of bytes reported by the ack to the number of bytes you have sent to
 	// that destination during the ack's time period.
-	bytesSent := dest.PacketsSent[ack.Destination].SumBytes(ack.StartTime, ack.EndTime)
+	bytesSent := dest.PacketsSent.SumBytes(ack.StartTime, ack.EndTime)
 
 	// Calculate packet success percentage using these numbers.
-	packetSuccess := float64(ack.BytesReceived / bytesSent)
+
+	packetSuccess := float32(ack.BytesReceived) / float32(bytesSent)
 
 	// If the packet success percentage computed from the ack is over some threshold lower than the
 	// packet success percentage reported by the next hop, adjust the packet success percentage
 	// through that next hop.
-	log.Println(packetSuccess)
+	log.Printf("ack.BytesReceived: %v\n", float32(ack.BytesReceived))
+	log.Printf("bytesSent: %v\n", float32(bytesSent))
+	log.Printf("Packet succes: %v\n", packetSuccess)
 
 	return nil
 }
@@ -232,7 +246,9 @@ func (node *Node) HandleAck(payload []byte) error {
 func (prs PacketRecords) SumBytes(start time.Time, end time.Time) int {
 	acc := 0
 	for _, pr := range prs {
-		acc += pr.Bytes
+		if pr.Time.After(start) && pr.Time.Before(end) {
+			acc += pr.Bytes
+		}
 	}
 
 	return acc

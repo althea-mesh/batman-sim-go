@@ -45,11 +45,13 @@ func main() {
 	a := Node{
 		Address:       "A",
 		PacketChannel: make(chan (Packet)),
+		Sources:       map[string]Source{},
 	}
 
 	b := Node{
 		Address:       "B",
 		PacketChannel: make(chan (Packet)),
+		Sources:       map[string]Source{},
 	}
 
 	aToB := Edge{
@@ -74,7 +76,7 @@ func main() {
 			NextHop: NextHop{
 				Address: "B",
 			},
-			PacketsSent: map[string]PacketRecords{},
+			PacketsSent: PacketRecords{},
 		},
 	}
 
@@ -90,7 +92,7 @@ func main() {
 			NextHop: NextHop{
 				Address: "A",
 			},
-			PacketsSent: map[string]PacketRecords{},
+			PacketsSent: PacketRecords{},
 		},
 	}
 
