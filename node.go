@@ -150,9 +150,11 @@ func (node *Node) HandlePacket(packet Packet) {
 func (node *Node) UpdateSourceRecord(packet Packet) {
 	source, exists := node.Sources[packet.Source]
 	if exists {
-		source.BytesReceived += len(packet.Payload)
+		source.BytesReceived = source.BytesReceived + len(packet.Payload)
 		if time.Since(source.LastAckTime) > ackInterval {
-			node.SendAck(packet.Source)
+			node.SendAck(source)
+			source.BytesReceived = 0
+			source.LastAckTime = time.Now()
 		}
 	} else {
 		source = Source{
@@ -166,8 +168,7 @@ func (node *Node) UpdateSourceRecord(packet Packet) {
 }
 
 // SendAck Sends an Ack to a source, and resets the BytesReceived counter
-func (node *Node) SendAck(sourceAddress string) error {
-	source := node.Sources[sourceAddress]
+func (node *Node) SendAck(source Source) error {
 	payload, err := json.Marshal(Ack{
 		BytesReceived: source.BytesReceived,
 		StartTime:     source.LastAckTime,
@@ -181,14 +182,11 @@ func (node *Node) SendAck(sourceAddress string) error {
 	}
 
 	node.SendPacket(Packet{
-		Destination: sourceAddress,
+		Destination: source.Address,
 		Source:      node.Address,
 		Type:        "ACK",
 		Payload:     payload,
 	})
-
-	source.BytesReceived = 0
-	node.Sources[sourceAddress] = source
 
 	return nil
 }
@@ -236,9 +234,10 @@ func (node *Node) HandleAck(payload []byte) error {
 	// If the packet success percentage computed from the ack is over some threshold lower than the
 	// packet success percentage reported by the next hop, adjust the packet success percentage
 	// through that next hop.
-	log.Printf("ack.BytesReceived: %v\n", float32(ack.BytesReceived))
-	log.Printf("bytesSent: %v\n", float32(bytesSent))
-	log.Printf("Packet succes: %v\n", packetSuccess)
+	log.Printf(
+		"ack.BytesReceived: %v, bytesSent: %v, packet success: %v",
+		ack.BytesReceived, bytesSent, packetSuccess,
+	)
 
 	return nil
 }
